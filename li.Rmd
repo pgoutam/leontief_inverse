@@ -1,0 +1,329 @@
+---
+title: "Leontief Inverse Calculation"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+# Bangladesh Leontief Inverse 
+
+Load required packages 
+```{r}
+library(data.table)
+library(readxl)
+```
+
+## Data Cleaning 
+
+#### Read in data 
+
+Let's read in the Bangladesh IO table
+```{r}
+setwd("/Users/prodyumna_goutam/Downloads")
+input_file <- read_excel("Inpur Outpur Table _2007_Final.xls",
+                      sheet="IOT07", 
+                      skip = 1)
+bgd_iot <- as.data.table(input_file)
+```
+
+#### Clean up
+
+Take a quick look at what the io table looks like 
+```{r}
+head(bgd_iot)
+```
+
+We need to do a few data cleaning things:
+```{r}
+bgd_iot <- bgd_iot[-1,] # drop first obs thats just names of sectors
+colnames(bgd_iot) <- paste0("io",colnames(bgd_iot)) # prepend colnames with IO 
+
+dropcol <- c("io..89","io..90","io..91",
+             "io..92","io..93","io..94",
+             "io..95","io..96")
+bgd_iot[, (dropcol) := NULL] # drop unnecessary columns 
+```
+
+Let's take a look at the last few rows bgd_iot table  
+```{r}
+bgd_iot[86:96,1:5]
+```
+
+Notice that it contains the Value Added summary measure that we will need for our calculation, so extract that and drop the summary measures because we won't need it 
+```{r}
+bgd_iot_summ <- bgd_iot[`ioMillion Taka` %in% c("Value Added"), ] # extract value added 
+bgd_iot_summ[, c("io..1","ioMillion Taka") := NULL]
+
+bgd_iot <- bgd_iot[!(87:101), ] # drop unnecessary summary measures 
+bgd_iot[,`ioMillion Taka` := NULL] # drop unnecessary rows
+setnames(bgd_iot,"io..1","Commodity") # rename columns 
+bgd_iot[, Commodity := paste0("io",Commodity)]
+```
+
+
+Convert columns to numeric from character
+```{r}
+bgd_iot[,c(paste0("io",1:86))] <- lapply(bgd_iot[,c(paste0("io",1:86))], as.numeric)
+bgd_iot_summ <- bgd_iot_summ[, lapply(.SD,as.numeric), .SDcols = paste0("io",1:86)]
+```
+
+
+Finally, convert to a matrix 
+```{r}
+bgd_iot_mat <- as.matrix(bgd_iot, rownames = "Commodity")
+bgd_iot_summ_mat <- as.matrix(bgd_iot_summ)
+```
+
+
+## IO Coefficient matrix 
+
+We now have an io table with input usage, we will need to convert this to an IO coeffcient matrix. 
+
+This is fairly straightforward: 
+
+1. Add across rows of the io table to get total input usage 
+2. Add the value added for each industry 
+3. Divide each cell of input table by the total output for a particular sector 
+
+
+Let's write a function to do that 
+
+```{r}
+io_coeff_calc <- function(iomat,suppmat) {
+  
+  #Sum across rows for total input
+  totinput <- colSums(iomat)  
+  
+  # Create total output
+  totoutput <- vector(mode = "numeric", length = length(totinput))
+  names(totoutput) <- names(totinput)
+  for (i in names(totoutput)){
+     totoutput[i] <- totinput[i] + suppmat[,i]
+  }
+  
+  # IO Coefficient matrix 
+  # Note: We are going to be explicit and index by the 
+  # the name of the sector and loop
+  iot_coeff <- matrix(nrow = nrow(iomat), ncol = ncol(iomat))
+  rownames(iot_coeff) <- rownames(iomat)
+  colnames(iot_coeff) <- colnames(iomat)
+
+  for (i in colnames(iot_coeff)) {
+    iot_coeff[,i] <- iomat[,i]/totoutput[i]
+  }
+  return (iot_coeff)
+}
+```
+
+
+```{r}
+bgd_iot_coeff <- io_coeff_calc(bgd_iot_mat,bgd_iot_summ_mat)
+```
+
+
+## Leontief inverse
+
+```{r}
+# Identity matrix 
+ident <- diag(nrow = nrow(bgd_iot_coeff))
+
+# Leontief Inverse
+bgd_li <- solve(ident - bgd_iot_coeff)
+```
+
+
+Read out as csv 
+```{r}
+write.csv(bgd_li, file = "bgd_li.csv")
+```
+
+
+# India Leontief Inverse 
+
+## Data Cleaning 
+
+#### Read in data
+```{r}
+input_file <- read_excel("India IO Matrix 2003-04.xls",
+                         skip = 5)
+ind_iot <- as.data.table(input_file)
+```
+
+#### Clean up
+
+Take a look 
+```{r}
+head(ind_iot)
+```
+
+
+```{r}
+tail(ind_iot)
+```
+
+
+As above, let's do a little cleanup 
+```{r}
+# Drop unnecessary columns 
+dropcol <- c("IIUSE","PFCE","GFCE",
+             "GFCF","CIS","EXP",
+             "less IMP","TFUSE","Total")
+ind_iot[, (dropcol) := NULL]
+setnames(ind_iot,c("Commodity / Industry","..2"),c("IndCode","Industry"))
+```
+
+
+We also want to separate out the summary rows at the bottom of the data and use it separately 
+```{r}
+rlist <- c("Total Input","NIT","Total Input+NIT", 
+           "GVA","Total Output")
+ind_iot_summ <- ind_iot[Industry %in% rlist, ][, IndCode := NULL]
+ind_iot <- ind_iot[!(Industry %in% rlist), ]
+```
+
+
+
+## India-Bangladesh IO Concordance 
+
+So, it's clear that the organization of the India IO is different that the organization of the Bangladesh IO that we constructed in the section above. 
+
+We will need to build a concordance and sum the rows and columns of the India IOT appropriately. 
+
+
+First, load in the concordance between India and Bangladesh IO sectors
+```{r}
+input_file <- read_excel("Exports and Informality Mappings Final.xlsx", 
+                         sheet = "INDIO-BGDIO")
+ind_bgd <- as.data.table(input_file)
+```
+
+We will now need to sum the rows. Let's write a function to do that. 
+```{r}
+sum_dt <- function(x,y,by_x,by_y) {
+  merge_dt <- merge(x,y,by.x=by_x,by.y=by_y,all=TRUE) # Merge dt with mapping 
+  sum_merge_dt <- merge_dt[ , lapply(.SD,sum), by = consolid_iot_code]
+  return(sum_merge_dt)
+}
+```
+
+Sum rows of the india iot
+```{r}
+ind_iot_merge <- sum_dt(ind_iot[, !c("Industry")], 
+                  ind_bgd[,c("ind_iot_code","consolid_iot_code")],
+                  by_x = "IndCode",
+                  by_y = "ind_iot_code") 
+```
+
+
+Now, we will sum the columns using a small trick: we will transpose the data and then sum the rows of the transposed table as above 
+
+Transpose first 
+```{r}
+ind_iot_mergeT <- dcast(melt(ind_iot_merge,id.vars = "consolid_iot_code", variable.name = "IndCode"), 
+                        IndCode ~ consolid_iot_code)
+ind_iot_mergeT[, IndCode := as.numeric(as.character(IndCode))]
+```
+
+OKay, let's repeat what we did before 
+
+```{r}
+ind_iot_mergeT <- merge(ind_iot_mergeT,
+                       ind_bgd[,!c("ind_iot_name","consolid_iot_name")], 
+                       by.x = "IndCode",by.y = "ind_iot_code", all = TRUE)
+ind_iot_mergeT <- ind_iot_mergeT[, lapply(.SD,sum), by = consolid_iot_code]
+ind_iot_mergeT[, IndCode := NULL]
+```
+
+
+Rotate Back to get the final consolidated Indian IO table 
+
+```{r}
+ind_iot_consolid <- dcast(melt(ind_iot_mergeT,id.vars = "consolid_iot_code"), 
+                        variable ~ consolid_iot_code)
+```
+
+
+Okay, let's convert this to a matrix and proceed 
+
+```{r}
+ind_iot_mat <- as.matrix(ind_iot_consolid, rownames = "variable")
+```
+
+
+
+## IO Coefficient Matrix 
+
+Let's take a look at the summary matrix which contains the India information: 
+
+```{r}
+head(ind_iot_summ)
+```
+
+We need the GVA (Gross Value Added) row, but notice that the column codes are India IOT codes
+
+
+Notice that the columns actually follow the coding for India IOT. We need to consolidate this as well:
+
+
+
+```{r}
+ind_iot_summT <- dcast(melt(ind_iot_summ, 
+                            id.vars = "Industry", 
+                            variable.name = "IndCode",
+                            variable.factor = FALSE),
+                       IndCode ~ Industry)
+```
+
+
+```{r}
+ind_iot_summT[,IndCode := as.numeric(IndCode)]
+setnames(ind_iot_summT,"GVA","ValueAdded")
+ind_iot_summT <- merge(ind_iot_summT[,c("IndCode","ValueAdded")],
+                       ind_bgd[,c("ind_iot_code","consolid_iot_code")],
+                       by.x = "IndCode",by.y = "ind_iot_code",
+                       all = TRUE)
+ind_iot_summT <- ind_iot_summT[, lapply(.SD,sum), by = consolid_iot_code]
+ind_iot_summT[, consolid_iot_code := as.character(consolid_iot_code)]
+```
+
+
+```{r}
+totinput <- colSums(ind_iot_mat)
+```
+
+```{r}
+extractcols <- names(totinput)
+```
+
+```{r}
+totoutput <- vector(mode = "numeric", length = length(totinput))
+names(totoutput) <- extractcols
+for (i in extractcols){
+   totoutput[i] <- totinput[i] + ind_iot_summT[consolid_iot_code==i,ValueAdded]
+}
+```
+
+```{r}
+iot_coeff <- matrix(nrow = nrow(ind_iot_mat), ncol = ncol(ind_iot_mat))
+rownames(iot_coeff) <- rownames(ind_iot_mat)
+colnames(iot_coeff) <- colnames(ind_iot_mat)
+
+for (i in colnames(iot_coeff)) {
+  iot_coeff[,i] <- ind_iot_mat[,i]/totoutput[i]
+}
+```
+
+
+```{r}
+ident <- diag(nrow = nrow(iot_coeff))
+ind_li <- solve(ident - iot_coeff)
+```
+
+
+
+```{r}
+write.csv(ind_li, file = "ind_li.csv")
+write.csv(iot_coeff, file = "ind_iot_coeff.csv")
+```
+
